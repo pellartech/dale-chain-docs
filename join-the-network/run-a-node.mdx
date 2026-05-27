@@ -1,7 +1,177 @@
 ---
 title: 'Run a node'
-description: 'Run your own node and join the network'
+description: 'How to setup and run your own DALE node'
 icon: 'circle-nodes'
 ---
 
-## Basic usage
+This guide is for anyone who wants to run their own node to follow the  DALE chain, expose a private RPC endpoint for an 
+application, or peer with the network as an independent operator.
+
+<Note> **devnet-1 is a development network.** State may be reset without notice, validator set membership is permissioned, and the network is 
+not suitable for production workloads. Public, persistent endpoints will be deployed in due course.</Note>
+
+## Network identity
+
+
+| Field            | Value                                                                      |
+| ---------------- | -------------------------------------------------------------------------- |
+| Network name     | devnet-1                                                              |
+| Chain ID         | `16001`                                                                    |
+| Consensus        | Post-Merge Proof of Stake (Ethereum)                                       |
+| EL client tested | Geth `v1.17.3`                                                             |
+| CL client tested | Lighthouse `v8.1.3`                                                        |
+| Forks active     | Fulu-Osaka ("Fusaka") |
+
+
+Any Ethereum-compatible execution and consensus client that supports Prague/Osaka should work, but only the versions above are continuously 
+tested.
+
+## Chain configuration files
+
+Your node needs the network's genesis state and consensus-layer config. These are published to a public S3 bucket:
+
+<Tip>The download commands in the next section pull all five files in one go.</Tip>
+
+```text
+Base URL:
+  https://dale-chain-public-configs.s3.ap-southeast-1.amazonaws.com/devnet-1/
+
+Files:
+  genesis.json                 — EL genesis (geth)
+  config.yaml                  — CL fork schedule + spec
+  genesis.ssz                  — CL genesis state (raw, ready to use)
+  deploy_block.txt             — EL deposit-contract deploy block
+  deposit_contract_block.txt   — CL deposit-contract anchor block
+```
+
+
+
+## Hardware
+
+`devnet-1` is small and lightly loaded. A modest machine is fine:
+
+
+| Resource | Recommended                                                    |
+| -------- | -------------------------------------------------------------- |
+| CPU      | 4 vCPU                                                         |
+| RAM      | 8 GiB                                                          |
+| Disk     | 100 GiB NVMe SSD                                               |
+| Network  | Outbound to internet; inbound is optional but improves peering |
+
+
+If you want to expose your node's JSON-RPC publicly, open inbound `8545/tcp` (HTTP) or `8546/tcp` (WS) on your firewall. For peering, allowing 
+inbound `30303/tcp+udp` (EL) and `9000/tcp+udp` (CL) helps but isn't required. Clients work fine in outbound-only mode.
+
+## Run the node
+
+The steps below assume Linux/macOS with `geth` and `lighthouse` already installed.
+
+<Steps>
+    <Step title="Prepare the data directories and download the chain config">
+    ```bash
+    mkdir -p ~/dale/{el,cl,cl-config}
+
+    # Pull the chain config files from the public S3 bucket.
+    BASE=https://dale-chain-public-configs.s3.ap-southeast-1.amazonaws.com/devnet-1
+    curl -fsSL "$BASE/genesis.json"                -o ~/dale/el/genesis.json
+    curl -fsSL "$BASE/config.yaml"                 -o ~/dale/cl-config/config.yaml
+    curl -fsSL "$BASE/deploy_block.txt"            -o ~/dale/cl-config/deploy_block.txt
+    curl -fsSL "$BASE/deposit_contract_block.txt"  -o ~/dale/cl-config/deposit_contract_block.txt
+    curl -fsSL "$BASE/genesis.ssz"                 -o ~/dale/cl-config/genesis.ssz
+
+    # JWT secret shared between geth (Engine API) and lighthouse.
+    openssl rand -hex 32 > ~/dale/jwt.hex
+    ```
+    </Step>
+
+    <Step title="Initialise the execution layer">
+    ```bash
+    geth init --datadir ~/dale/el ~/dale/el/genesis.json
+    ```
+    </Step>
+
+    <Step title="Start Geth">
+    ```bash
+    geth \
+    --datadir ~/dale/el \
+    --networkid 16001 \
+    --bootnodes "enode://0b5a55b7906f36764c252504b2113b92b182c22254441d10a872a7a5e57bb37c3744387eec147dc70d04d1e8cc7001314e6bc6ee9e06dd660e5df0c5a105b54a@52.76.233.142:30303" \
+    --syncmode snap \
+    --http --http.api eth,net,web3 \
+    --authrpc.addr 127.0.0.1 \
+    --authrpc.port 8551 \
+    --authrpc.jwtsecret ~/dale/jwt.hex
+    ```
+    </Step>
+
+    <Step title="Start Lighthouse">
+    In a second terminal:
+
+    ```bash
+    lighthouse bn \
+    --testnet-dir ~/dale/cl-config \
+    --datadir ~/dale/cl \
+    --boot-nodes "enr:-Ou4QNuvPnkhVbWIGeolxkXd2hE0jB6jStAEHtOZQNjG0a_NNSRqbiBl540txkDhIkYi5Lk8sYbNma5Fb1mwMXoh5LcPh2F0dG5ldHOIAAAAAAYAAACDY2djBIZjbGllbnTRikxpZ2h0aG91c2WFOC4xLjOEZXRoMpCUtoNecAAAAf__________gmlkgnY0gmlwhDazTTSDbmZkhJS2g16EcXVpY4IjKYlzZWNwMjU2azGhAxOvNYnvPnLJczHUAHSms6AaGAiY8_ZIePsdi8AxEPSEiHN5bmNuZXRzAIN0Y3CCIyiDdWRwgiMo" \
+    --execution-endpoint http://localhost:8551 \
+    --execution-jwt ~/dale/jwt.hex \
+    --checkpoint-sync-url https://beacon.validator-0.devnet-1.dalechain.dev \
+    --http \
+    --trusted-peers 16Uiu2HAmDyq41ecDyqy8QoMkrnttNFRpmGJcLzXR7hbcVVuQXsSs
+    ```
+
+    The `--checkpoint-sync-url` lets lighthouse jump to a recent finalized head instead of replaying from genesis. Without it, joining a running
+    PoS chain deadlocks because the execution layer refuses to sync until the consensus layer drives forkchoice, and vice versa.
+    </Step>
+</Steps>
+
+## Verify your node is healthy
+
+```bash
+# EL peer count — should reach >= 1 within ~30s.
+geth attach --exec 'net.peerCount' http://localhost:8545
+
+# CL peer count.
+curl -s http://localhost:5052/eth/v1/node/peer_count
+
+# EL head block — should be advancing.
+geth attach --exec 'eth.blockNumber' http://localhost:8545
+
+# CL head slot.
+curl -s http://localhost:5052/eth/v1/node/syncing | jq
+```
+
+Once both layers report peers and the EL block number matches what you see at our public RPC endpoint 
+[https://rpc.devnet-1.dalechain.dev](https://rpc.devnet-1.dalechain.dev), your node is in sync.
+
+## Using your node
+
+The local execution-layer JSON-RPC is at `http://localhost:8545`. Point any Ethereum tooling (ethers, viem, web3.py, foundry, hardhat) at it 
+to interact with `devnet-1`.
+
+Example with `cast`:
+
+```bash
+cast chain-id     --rpc-url http://localhost:8545   # → 16001
+cast block-number --rpc-url http://localhost:8545
+```
+
+If you want to expose this to other applications, put it behind a reverse proxy with TLS and auth as the bare geth endpoint is unauthenticated
+by design.
+
+## Troubleshooting
+
+1. **Lighthouse logs `Failed to parse or resolve address`** — your machine can't reach DNS for `cl.bootnode-0.devnet-1.dalechain.dev`. Confirm 
+with `dig +short cl.bootnode-0.devnet-1.dalechain.dev` (expect `54.179.77.52`).
+
+2. **Geth shows 0 peers for more than a few minutes** — check that outbound 30303/tcp+udp is allowed by your firewall, and that nothing on your 
+system is already bound to those ports.
+
+3. **Lighthouse logs `Backfill sync stalled`** — this is benign for new nodes; backfill runs in the background after checkpoint sync completes. 
+Forward sync (current head) is what matters for usability.
+
+4. `**eth_getBalance`/`eth_call` returns 0x or fails for historical blocks** — geth here is running in snap-sync mode and prunes state history. 
+For full historical access, run with `--syncmode full --gcmode archive` (slower initial sync, much larger disk footprint), or use the 
+published RPC endpoint once it's announced.
+
+5. **EL block number isn't advancing** — confirm the JWT secret used by geth (`--authrpc.jwtsecret`) is the exact same file that lighthouse 
+points at (`--execution-jwt`). Different secrets cause silent forkchoice failures.
