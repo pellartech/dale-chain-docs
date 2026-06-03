@@ -1,11 +1,11 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
-  "name": "DALE Network Documentation",
+  "name": "DALE Chain Documentation",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#3F5EE7",
+    "light": "#3F5EE7",
+    "dark": "#142279"
   },
   "favicon": "/favicon.svg",
   "navigation": {
@@ -65,8 +65,8 @@
     }
   },
   "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "light": "/images/dale-blockchain-logo-horizontal.svg",
+    "dark": "/images/dale-blockchain-logo-horizontal-light.svg"
   },
   "navbar": {
     "links": [
