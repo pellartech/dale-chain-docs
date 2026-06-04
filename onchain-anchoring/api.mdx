@@ -20,11 +20,7 @@ indexed contract events, and serves generated OpenAPI.
 | --- | --- |
 | Network | `devnet-1` |
 | API origin | `http://dale-devnet-alb-305857230.ap-southeast-1.elb.amazonaws.com` |
-| Health check | `http://dale-devnet-alb-305857230.ap-southeast-1.elb.amazonaws.com/health` |
 | OpenAPI | `http://dale-devnet-alb-305857230.ap-southeast-1.elb.amazonaws.com/openapi.json` |
-| Chain ID | `16001` |
-| RPC URL | `https://rpc.validator-0.devnet-1.dalechain.dev` |
-| Contract proxy | `0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B` |
 
 ## Authentication
 
@@ -34,9 +30,9 @@ Most routes require an API key:
 x-api-key: <DALE_API_KEY>
 ```
 
-The API also checks its allowed-account list. Devnet demo deployments can allow
-open relay access, while production deployments should restrict this list to
-approved EVM addresses.
+On devnet, any EVM account can prepare and submit anchors with a valid API key.
+If another environment returns `account_not_allowed`, ask for that address to be
+enabled before preparing or submitting anchors.
 
 Public routes are `GET /health`, `GET /openapi.json`, `GET /docs`, and
 `POST /utils/hash`.
