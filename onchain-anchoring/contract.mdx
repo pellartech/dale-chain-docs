@@ -1,0 +1,110 @@
+---
+title: 'Anchoring contract'
+description: 'How DALE stores supply-chain anchors on-chain'
+icon: 'file-lock'
+---
+
+`CanonicalSupplyChain` is the on-chain proof layer for DALE supply-chain anchors.
+It stores append-only anchor records and emits events that off-chain systems can index.
+
+The deployed proxy address is the address applications should use. API services,
+workers, indexers, SDK clients, and demos should all point at the proxy rather than
+the implementation contract.
+
+## Devnet deployment
+
+| Field | Value |
+| --- | --- |
+| Network | `devnet-1` |
+| Chain ID | `16001` |
+| RPC URL | `https://rpc.validator-0.devnet-1.dalechain.dev` |
+| Explorer | `https://devnet.dalechain.dev` |
+| Contract proxy | [`0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B`](https://devnet.dalechain.dev/address/0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B) |
+| Deployment block | `425850` |
+| Deployment transaction | [`0x13f2b3eabb4d064d1f34ea9586e9485740c25d5afcf11630a140bac6746c3ed0`](https://devnet.dalechain.dev/tx/0x13f2b3eabb4d064d1f34ea9586e9485740c25d5afcf11630a140bac6746c3ed0) |
+
+## Anchor data
+
+Each anchor has a type, payload hash, optional tag hash, credited account, and
+anchor ID. Anchor IDs are array indexes in the contract's append-only storage.
+
+| Contract value | API and SDK type | Behavior |
+| --- | --- | --- |
+| `0` | `hashSha256` | Stores a 32-byte SHA-256 commitment. |
+| `1` | `hashPoseidon` | Stores a 32-byte Poseidon commitment. |
+| `2` | `plaintext` | Stores plaintext bytes and also records `sha256(data)`. |
+
+Plaintext payloads are capped at 1024 UTF-8 bytes. Hash payloads must be exactly
+32 bytes.
+
+## Stored shape
+
+```solidity
+struct SupplyAnchor {
+    uint256 id;
+    bytes data;
+    uint8 dataType;
+    bytes32 dataHash;
+    bytes32 tagHash;
+    address account;
+}
+```
+
+Hash anchors store an empty `data` value and the supplied commitment in `dataHash`.
+Plaintext anchors store the plaintext bytes in `data` and a SHA-256 digest in
+`dataHash`.
+
+## Event
+
+```solidity
+event SupplyAnchorCreated(
+    bytes32 indexed tagHash,
+    bytes32 indexed dataHash,
+    address indexed account,
+    uint256 id,
+    uint8 dataType,
+    bytes data
+);
+```
+
+The indexer reads `SupplyAnchorCreated` logs and writes a queryable copy to the
+application database. `tagHash`, `dataHash`, and `account` are indexed on-chain
+so callers can filter logs efficiently.
+
+## Submission paths
+
+`storeSupplyAnchor(uint8 dataType, bytes data, bytes32 tagHash)` stores an anchor
+credited to `msg.sender`. Use this path when the wallet or backend sending the
+transaction should be the on-chain creator.
+
+`storeSupplyAnchorFrom(address account, uint8 dataType, bytes data, bytes32 tagHash, uint256 nonce, bytes signature)`
+stores an anchor credited to `account` after verifying an EIP-712 signature. Use
+this path when a worker relays and pays gas, but the user's wallet should remain
+the on-chain creator.
+
+## EIP-712 signatures
+
+Relayed submissions sign this primary type:
+
+```text
+StoreSupplyAnchor(address account,uint8 dataType,bytes data,bytes32 tagHash,uint256 nonce)
+```
+
+The domain uses:
+
+| Field | Value |
+| --- | --- |
+| `name` | `CanonicalSupplyChain` |
+| `version` | `1` |
+| `chainId` | `16001` on `devnet-1` |
+| `verifyingContract` | `0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B` on `devnet-1` |
+
+The contract checks that the recovered signer matches the credited `account` and
+that the supplied `nonce` matches `nonces(account)`. The nonce is consumed only
+after the signature is valid.
+
+## Validation
+
+The contract rejects invalid data types, hash payloads with the wrong byte length,
+oversized plaintext payloads, signatures from the wrong account, and stale or
+incorrect nonces.

@@ -1,0 +1,166 @@
+---
+title: 'Anchoring SDK'
+description: 'Use @dale/sdk to create, sign, submit, and watch DALE anchors'
+icon: 'code'
+---
+
+`@dale/sdk` is the TypeScript client for DALE anchoring. It wraps API calls, viem
+contract reads and writes, anchor normalization, signed relay preparation, event
+parsing, and polling.
+
+The SDK expects callers to provide viem clients. Use a `publicClient` for reads,
+watches, and transaction waits. Use a `walletClient` for signing and writes.
+
+## Devnet values
+
+| Field | Value |
+| --- | --- |
+| Network | `devnet-1` |
+| Chain ID | `16001` |
+| RPC URL | `https://rpc.validator-0.devnet-1.dalechain.dev` |
+| API origin | `http://dale-devnet-alb-305857230.ap-southeast-1.elb.amazonaws.com` |
+| Contract proxy | `0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B` |
+| Explorer | `https://devnet.dalechain.dev` |
+
+## Create a client
+
+```ts
+import { createDaleClient } from "@dale/sdk";
+
+const dale = createDaleClient({
+  apiBaseUrl: "http://dale-devnet-alb-305857230.ap-southeast-1.elb.amazonaws.com",
+  apiKey: "<DALE_API_KEY>",
+  contractAddress: "0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B",
+  defaultAccount,
+  publicClient,
+  walletClient,
+});
+```
+
+| Option | Purpose |
+| --- | --- |
+| `apiBaseUrl` | Base URL for `@dale/api`. |
+| `apiKey` | Value sent as `x-api-key`. |
+| `contractAddress` | `CanonicalSupplyChain` proxy address. |
+| `defaultAccount` | Optional default viem `Account` or address. |
+| `publicClient` | Required for reads, watches, and transaction waits. |
+| `walletClient` | Required for signing and writes. |
+| `fetch` | Optional custom fetch implementation. |
+| `pollIntervalMs` | Optional default polling delay. |
+| `timeoutMs` | Optional transaction wait timeout. |
+
+When a browser creates a local private key, pass a viem `Account` object rather
+than only an address. That lets viem sign locally.
+
+Build the viem `publicClient` and `walletClient` for chain ID `16001` and RPC URL
+`https://rpc.validator-0.devnet-1.dalechain.dev`.
+
+## Anchor inputs
+
+You can submit an explicit anchor:
+
+```ts
+await dale.submitSignedViaApi({
+  anchor: {
+    type: "hashSha256",
+    data: "0x1111111111111111111111111111111111111111111111111111111111111111",
+    tag: "shipment-123",
+  },
+});
+```
+
+You can also submit JSON:
+
+```ts
+await dale.submitSignedViaApi({
+  anchor: {
+    json: {
+      shipmentId: "shipment-123",
+      status: "packed",
+    },
+    tag: "shipment-123",
+    visibility: "opaque",
+  },
+});
+```
+
+| Visibility | Resulting anchor type | Behavior |
+| --- | --- | --- |
+| `opaque` or omitted | `hashSha256` | Canonical JSON is SHA-256 hashed and only the digest is anchored. |
+| `transparent` | `plaintext` | Canonical JSON is stored on-chain as plaintext. |
+
+The SDK canonicalizes JSON by sorting object keys. It rejects non-finite numbers
+and a bare top-level `undefined`.
+
+## Submission modes
+
+| Method | Path | Who pays gas | On-chain credited account |
+| --- | --- | --- | --- |
+| `submitDirect` | Direct contract call to `storeSupplyAnchor` | Connected wallet | Transaction signer |
+| `submitSignedViaApi` | API prepare, EIP-712 sign, API submit, worker relay | Worker relayer | Signed account |
+
+Use `submitDirect` when the connected wallet should submit the transaction itself:
+
+```ts
+const result = await dale.submitDirect({
+  account: defaultAccount,
+  anchor: {
+    json: {
+      shipmentId: "shipment-123",
+      status: "packed",
+    },
+    visibility: "opaque",
+  },
+  wait: true,
+});
+
+console.log(result.transactionHash, result.event);
+```
+
+Use `submitSignedViaApi` when the user signs locally and the backend relays:
+
+```ts
+const result = await dale.submitSignedViaApi({
+  account: defaultAccount,
+  anchor: {
+    type: "plaintext",
+    data: "shipment 123 packed at dock 4",
+    tag: "shipment-123",
+  },
+});
+
+console.log(result.jobId, result.prepared.dataHash);
+```
+
+Track the returned `jobId` with `getJobStatus`.
+
+## API helpers
+
+| Method | Purpose |
+| --- | --- |
+| `prepareAnchor` | Calls `/anchor/prepare` and returns the typed-data payload. |
+| `getJobStatus(jobId)` | Calls `/anchor/status/:id`. |
+| `listEvents(options)` | Calls `/anchor/:account` or `/anchor/account`. |
+| `hashPayload(data)` | Calls `/utils/hash` for SHA-256 hashing. |
+
+`listEvents` accepts `account`, `limit`, `offset`, `tag`, and
+`useAuthenticatedAccount`.
+
+## Reads and watchers
+
+| Method | Purpose |
+| --- | --- |
+| `getSupplyAnchor(id)` | Reads `getSupplyAnchor` from the contract. |
+| `getAnchorCount()` | Reads `getAnchorCount` from the contract. |
+| `watchContractEvents(options)` | Uses viem to watch live `SupplyAnchorCreated` logs. |
+| `watchIndexedEvents(options)` | Polls the API event list and calls `onEvent` for unseen indexed events. |
+
+`watchContractEvents` can filter by `account`, `dataHash`, and `tagHash`.
+`watchIndexedEvents` can use the same API list filters and accepts `onError`,
+`pollIntervalMs`, and `signal`.
+
+## Errors
+
+API errors throw `DaleApiError` with `status`, `code`, `message`, and optional
+`details`. Local validation and missing-client cases throw regular `Error`
+values.

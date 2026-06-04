@@ -25,6 +25,14 @@
               "join-the-network/connect-a-wallet",
               "join-the-network/run-a-node"
             ]
+          },
+          {
+            "group": "Onchain anchoring",
+            "pages": [
+              "onchain-anchoring/contract",
+              "onchain-anchoring/api",
+              "onchain-anchoring/sdk"
+            ]
           }
         ]
       },

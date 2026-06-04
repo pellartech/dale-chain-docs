@@ -1,0 +1,146 @@
+---
+title: 'Anchoring API'
+description: 'Prepare, submit, and track on-chain anchors through the DALE API'
+icon: 'server'
+---
+
+`@dale/api` is the Fastify service that connects applications to DALE anchoring.
+It prepares EIP-712 signing payloads, queues anchor jobs, exposes job status, lists
+indexed contract events, and serves generated OpenAPI.
+
+<Card title="Recommended: use the SDK" icon="code" href="/onchain-anchoring/sdk">
+  For most applications, use `@dale/sdk` instead of calling the anchoring API
+  directly. The SDK handles payload normalization, EIP-712 signing, submission,
+  status polling, and event helpers.
+</Card>
+
+## Devnet endpoint
+
+| Field | Value |
+| --- | --- |
+| Network | `devnet-1` |
+| API origin | `http://dale-devnet-alb-305857230.ap-southeast-1.elb.amazonaws.com` |
+| Health check | `http://dale-devnet-alb-305857230.ap-southeast-1.elb.amazonaws.com/health` |
+| OpenAPI | `http://dale-devnet-alb-305857230.ap-southeast-1.elb.amazonaws.com/openapi.json` |
+| Chain ID | `16001` |
+| RPC URL | `https://rpc.validator-0.devnet-1.dalechain.dev` |
+| Contract proxy | `0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B` |
+
+## Authentication
+
+Most routes require an API key:
+
+```text
+x-api-key: <DALE_API_KEY>
+```
+
+The API also checks its allowed-account list. Devnet demo deployments can allow
+open relay access, while production deployments should restrict this list to
+approved EVM addresses.
+
+Public routes are `GET /health`, `GET /openapi.json`, `GET /docs`, and
+`POST /utils/hash`.
+
+## Core routes
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/utils/hash` | Hash strings or canonicalized JSON with SHA-256. |
+| `POST` | `/anchor/prepare` | Validate an anchor and return an EIP-712 payload to sign. |
+| `POST` | `/anchor/submit` | Queue an unsigned or signed anchor job. |
+| `GET` | `/anchor/status/:id` | Read the current state of a queued anchor job. |
+| `GET` | `/anchor/account` | List indexed events for the authenticated or selected account. |
+| `GET` | `/anchor/:account` | List indexed events for a specific allowed account. |
+
+## Anchor request
+
+```json
+{
+  "account": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "type": "hashSha256",
+  "data": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "tag": "origin-next"
+}
+```
+
+`type` can be `hashSha256`, `hashPoseidon`, or `plaintext`. Hash anchor data must
+be a `0x`-prefixed 32-byte hex string. Plaintext anchor data is a UTF-8 string up
+to 1024 bytes. `tag` is optional and is hashed before it reaches the contract.
+
+Signed submissions to `/anchor/submit` must include both:
+
+| Field | Description |
+| --- | --- |
+| `nonce` | Decimal uint256 string or safe integer returned by `/anchor/prepare`. |
+| `signature` | 65-byte EVM signature as `0x`-prefixed hex. |
+
+Supplying only one of `nonce` or `signature` is a validation error.
+
+## Signed relay flow
+
+Call `POST /anchor/prepare` with the anchor request. The API validates the request,
+checks the account allowlist, reads `nonces(account)` from the contract, and
+returns the normalized EIP-712 domain, types, and message.
+
+After the account signs that payload, call `POST /anchor/submit` with the same
+anchor request plus the returned `nonce` and wallet `signature`. The API verifies
+the signature before queueing the job. The worker later relays it through
+`storeSupplyAnchorFrom`, so the worker pays gas and the signed account is credited
+on-chain.
+
+Unsigned submissions are also accepted by `/anchor/submit`. In that case, the
+worker calls `storeSupplyAnchor`, and the worker transaction signer is credited
+on-chain.
+
+## Job status
+
+`POST /anchor/submit` returns a `jobId`. Track it with `GET /anchor/status/:id`.
+
+| Status | Meaning |
+| --- | --- |
+| `queued` | The job is ready for the worker. |
+| `processing` | The worker claimed the job and is submitting the transaction. |
+| `submitted` | The transaction hash is known and indexing may still be pending. |
+| `success` | The receipt emitted `SupplyAnchorCreated`; event and block details are available. |
+| `failed` | The worker hit a permanent error or exhausted retries. |
+
+Successful status responses can include `transactionHash`, `eventId`, `anchorId`,
+and `blockNumber`.
+
+## Listing events
+
+`GET /anchor/:account` and `GET /anchor/account` read indexed rows from
+`anchor_events`.
+
+Use these query parameters:
+
+| Parameter | Description |
+| --- | --- |
+| `limit` | Integer from 1 to 100. Defaults to `50`. |
+| `offset` | Integer greater than or equal to 0. Defaults to `0`. |
+| `tag` | Optional exact tag filter. |
+
+Hash anchors return an empty `data` value. Plaintext anchors return the indexed
+UTF-8 payload.
+
+## Error shape
+
+Explicit API errors use this shape:
+
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Request validation failed",
+    "details": [
+      {
+        "path": "data",
+        "message": "Hash data must be a 0x-prefixed 32-byte hex string"
+      }
+    ]
+  }
+}
+```
+
+Common codes include `unauthorized`, `account_not_allowed`, `validation_error`,
+`invalid_signature`, `contract_not_configured`, `not_found`, and `internal_error`.

@@ -4,13 +4,11 @@ description: "Welcome to the DALE network documentation"
 icon: 'rocket'
 ---
 
-
 DALE is a Layer 1 EVM blockchain purpose-built for supply chain logistics and, longer-term, decentralised supply chain finance (DeSCF).
-
 
 ## Quickstart
 
-Design a docs site that looks great and empowers your users.
+Use these guides to join the DALE network or build applications that anchor supply-chain proofs on-chain.
 
 <Columns cols={2}>
   <Card
@@ -18,7 +16,7 @@ Design a docs site that looks great and empowers your users.
     icon="wallet"
     href="/join-the-network/connect-a-wallet"
   >
-    Add the DALE network to your wallet to interact on-chain 
+    Add the DALE network to your wallet to interact on-chain
   </Card>
   <Card
     title="Run a node"
@@ -27,18 +25,25 @@ Design a docs site that looks great and empowers your users.
   >
     Run your own node to query data trustlessly
   </Card>
-    <Card
-    title="Deploy a contract"
-    icon="map"
-    href="/developers/deploy-a-contract"
+  <Card
+    title="Anchoring contract"
+    icon="file-lock"
+    href="/onchain-anchoring/contract"
   >
-    Check out our guide on how to deploy a smart contract
+    Learn how DALE stores append-only supply-chain anchors on-chain.
   </Card>
   <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
+    title="Anchoring API"
+    icon="server"
+    href="/onchain-anchoring/api"
   >
-    Auto-generate API documentation from OpenAPI specifications.
+    Prepare, submit, and track anchor jobs through the DALE API.
+  </Card>
+  <Card
+    title="Anchoring SDK"
+    icon="code"
+    href="/onchain-anchoring/sdk"
+  >
+    Use the TypeScript SDK with viem clients to sign and submit anchors.
   </Card>
 </Columns>
