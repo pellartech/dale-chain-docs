@@ -12,12 +12,6 @@ Nodes are separate from the DALE API, worker, indexer, and chain validators.
 They need chain RPC access and their own key material, but they do not need
 database access.
 
-<Warning>
-  Decryption nodes currently support the local proof-of-concept threshold suite.
-  Do not use this setup to protect real data until the cryptography is replaced
-  and reviewed.
-</Warning>
-
 ## HTTP API
 
 | Method | Path | Purpose |
@@ -131,5 +125,5 @@ verifies authorized and unauthorized decrypt attempts.
 - Nodes log approved and denied decisions with timestamp, requester, anchor ID,
   cohort ID, request hash, decision, and reason.
 - Nodes should be operated independently in a production network.
-- Production deployment still needs reviewed threshold cryptography, key
-  generation, membership governance, cohort rotation, and share backup policy.
+- Network operators should define key generation, membership governance, cohort
+  rotation, and share backup policy for their environment.

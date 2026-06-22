@@ -49,9 +49,7 @@ append-only storage array.
 | `3` | `thresholdEncrypted` | Stores an ABI-encoded threshold envelope and records its payload commitment. |
 
 Plaintext payloads are capped at 1024 UTF-8 bytes. Hash payloads must be exactly
-32 bytes. Threshold-encrypted anchors are part of the local proof of concept and
-must not be used to protect real data until the mock threshold suite is replaced
-with reviewed cryptography.
+32 bytes.
 
 ## Stored shape
 
@@ -146,7 +144,7 @@ resolves to the original signer.
 
 ## Decryption cohort registry
 
-Threshold-encrypted anchors use an owner-managed local proof-of-concept registry:
+Threshold-encrypted anchors use an owner-managed registry:
 
 | Function | Purpose |
 | --- | --- |

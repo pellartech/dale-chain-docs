@@ -9,12 +9,6 @@ encrypts supply-chain data before publication, stores the ciphertext envelope
 on-chain, and authorized requesters decrypt locally after collecting enough
 partial shares from decryption nodes.
 
-<Warning>
-  This is currently a local proof of concept. It uses a mock threshold suite and
-  must not protect real data until the suite is replaced with reviewed threshold
-  cryptography.
-</Warning>
-
 ## Disclosure modes
 
 | Mode | API and SDK type | On-chain data | Disclosure model |
@@ -144,8 +138,8 @@ an authorized user already decrypted and copied.
 
 ## Cohorts and node discovery
 
-A decryption cohort is a threshold keyset and node membership group. The current
-proof of concept stores public cohort and node metadata on-chain:
+A decryption cohort is a threshold keyset and node membership group. DALE stores
+public cohort and node metadata on-chain:
 
 | Metadata | Purpose |
 | --- | --- |
@@ -158,9 +152,8 @@ proof of concept stores public cohort and node metadata on-chain:
 | Node signing address | Verifies share responses. |
 | Node public share | Verifies suite-specific partial share proofs. |
 
-The local proof of concept uses a fixed local three-of-five cohort. Production
-membership, key generation, rotation, slashing, and re-encryption are separate
-design topics.
+Membership, key generation, rotation, slashing, and re-encryption are separate
+network design topics.
 
 ## Trust model
 
@@ -190,5 +183,3 @@ Known limitations:
 - Users who already decrypted plaintext can copy or share it.
 - Decryption nodes can see request metadata.
 - On-chain encrypted payloads can be expensive for large records.
-- Production use requires audited threshold cryptography and cryptographic
-  review.
