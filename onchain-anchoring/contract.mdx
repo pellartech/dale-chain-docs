@@ -1,106 +1,168 @@
 ---
 title: 'Anchoring contract'
-description: 'How DALE stores supply-chain anchors on-chain'
+description: 'How DALE stores thread-scoped supply-chain anchors on-chain'
 icon: 'file-lock'
 ---
 
 `CanonicalSupplyChain` is the on-chain proof layer for DALE supply-chain anchors.
-It stores append-only anchor records and emits events that off-chain systems can index.
+It stores append-only anchor records inside deterministic supply-chain threads,
+emits events for indexers, and delegates access checks to built-in thread policy
+plus optional access handlers.
 
-The deployed proxy address is the address applications should use. API services,
-workers, indexers, SDK clients, and demos should all point at the proxy rather than
-the implementation contract.
+Applications should use the deployed proxy address. API services, workers,
+indexers, SDK clients, and demos should point at the proxy rather than the
+implementation contract.
 
 ## Devnet deployment
 
 | Field | Value |
 | --- | --- |
-| Contract proxy address | [`0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B`](https://devnet.dalechain.dev/address/0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B) |
-| Implementation address | [`0x91b38dAdF37d2F58D561e03d3E2c4e38c7d0f628`](https://devnet.dalechain.dev/address/0x91b38dAdF37d2F58D561e03d3E2c4e38c7d0f628) |
-| Deployment transaction | [`0x13f2b3eabb4d064d1f34ea9586e9485740c25d5afcf11630a140bac6746c3ed0`](https://devnet.dalechain.dev/tx/0x13f2b3eabb4d064d1f34ea9586e9485740c25d5afcf11630a140bac6746c3ed0) |
+| Contract proxy address | [`0xBCb9211802e530Fd6BE7Cd9157715249a15cAD9c`](https://devnet.dalechain.dev/address/0xBCb9211802e530Fd6BE7Cd9157715249a15cAD9c) |
+| Implementation address | [`0xc7f17BEb4b4236b4cD18029a429DE5A206FE2A1c`](https://devnet.dalechain.dev/address/0xc7f17BEb4b4236b4cD18029a429DE5A206FE2A1c) |
+| Trusted forwarder | [`0x3D64Df3Fe6D10401891FC09251dA9bb7A0D0DAe4`](https://devnet.dalechain.dev/address/0x3D64Df3Fe6D10401891FC09251dA9bb7A0D0DAe4) |
+| Deployment block | `805669` |
+| Deployment transaction | [`0xbbeea2a52ab9144f5f280973c888ca6c282b3144389f2f1d0f117b5ed872f2f9`](https://devnet.dalechain.dev/tx/0xbbeea2a52ab9144f5f280973c888ca6c282b3144389f2f1d0f117b5ed872f2f9) |
 
-## Anchor data
+## Contract modules
 
-Each anchor has a type, payload hash, optional tag hash, credited account, and
-anchor ID. Anchor IDs are array indexes in the contract's append-only storage.
+The contract package is split into focused Solidity files:
+
+| Module | Purpose |
+| --- | --- |
+| `CanonicalSupplyChain.sol` | UUPS proof contract with anchor storage, validation, thread anchoring, cohort registry, and ERC-2771 support. |
+| `Threads.sol` | Thread lifecycle, owner/participant access, handler hooks, and two-step ownership transfer. |
+| `SupplyAnchor.sol` | Shared `AnchorType` enum and `SupplyAnchor` struct. |
+| `IThreadAccessHandler.sol` | Optional handler interface for additive read/write policy. |
+| `TrustedForwarder.sol` | OpenZeppelin `ERC2771Forwarder` with the `TrustedForwarder` EIP-712 domain name. |
+
+## Anchor types
+
+Each anchor has a thread ID, type, payload commitment, optional tag hash,
+credited account, and global anchor ID. Anchor IDs are array indexes in the
+append-only storage array.
 
 | Contract value | API and SDK type | Behavior |
 | --- | --- | --- |
 | `0` | `hashSha256` | Stores a 32-byte SHA-256 commitment. |
 | `1` | `hashPoseidon` | Stores a 32-byte Poseidon commitment. |
-| `2` | `plaintext` | Stores plaintext bytes and also records `sha256(data)`. |
+| `2` | `plaintext` | Stores plaintext bytes and records `sha256(data)`. |
+| `3` | `thresholdEncrypted` | Stores an ABI-encoded threshold envelope and records its payload commitment. |
 
 Plaintext payloads are capped at 1024 UTF-8 bytes. Hash payloads must be exactly
-32 bytes.
+32 bytes. Threshold-encrypted anchors are part of the local proof of concept and
+must not be used to protect real data until the mock threshold suite is replaced
+with reviewed cryptography.
 
 ## Stored shape
 
 ```solidity
 struct SupplyAnchor {
-    uint256 id;
-    bytes data;
-    uint8 dataType;
+    bytes32 threadId;
     bytes32 dataHash;
     bytes32 tagHash;
     address account;
+    uint8 anchorType;
+    bytes data;
 }
 ```
 
-Hash anchors store an empty `data` value and the supplied commitment in `dataHash`.
-Plaintext anchors store the plaintext bytes in `data` and a SHA-256 digest in
-`dataHash`.
+Hash anchors store an empty `data` value and the supplied commitment in
+`dataHash`. Plaintext anchors store bytes in `data` and a SHA-256 digest in
+`dataHash`. Threshold-encrypted anchors store an ABI-encoded
+`ThresholdEnvelopeV1` in `data`; `dataHash` stores the envelope
+`payloadCommitment`.
 
 ## Event
 
 ```solidity
 event SupplyAnchorCreated(
-    bytes32 indexed tagHash,
+    bytes32 indexed threadId,
     bytes32 indexed dataHash,
     address indexed account,
     uint256 id,
-    uint8 dataType,
-    bytes data
+    uint8 anchorType,
+    bytes data,
+    bytes32 tagHash
 );
 ```
 
 The indexer reads `SupplyAnchorCreated` logs and writes a queryable copy to the
-application database. `tagHash`, `dataHash`, and `account` are indexed on-chain
+application database. `threadId`, `dataHash`, and `account` are indexed on-chain
 so callers can filter logs efficiently.
 
-## Submission paths
+## Thread anchoring
 
-`storeSupplyAnchor(uint8 dataType, bytes data, bytes32 tagHash)` stores an anchor
-credited to `msg.sender`. Use this path when the wallet or backend sending the
-transaction should be the on-chain creator.
+`storeThreadAnchor(bytes32 threadId, uint8 anchorType, bytes data, bytes32 tagHash)`
+stores an anchor credited to the effective sender and returns the new anchor ID.
+The contract first builds and validates the anchor, then checks write access
+against the thread before storing it.
 
-`storeSupplyAnchorFrom(address account, uint8 dataType, bytes data, bytes32 tagHash, uint256 nonce, bytes signature)`
-stores an anchor credited to `account` after verifying an EIP-712 signature. Use
-this path when a worker relays and pays gas, but the user's wallet should remain
-the on-chain creator.
+Thread owners and participants have built-in read/write access. A thread can also
+set an optional handler that grants additional thread-wide or per-anchor access.
+Handlers are additive: they can grant access, but they cannot revoke owner or
+participant access.
 
-## EIP-712 signatures
+Important read helpers:
 
-Relayed submissions sign this primary type:
+| Function | Purpose |
+| --- | --- |
+| `canReadAll(bytes32 threadId, address account)` | Checks thread-wide read access. |
+| `canRead(bytes32 threadId, uint256 anchorId, address account)` | Checks thread-wide read access, then per-anchor handler access. |
+| `canWrite(bytes32 threadId, uint8 anchorType, bytes data, bytes32 tagHash, address account)` | Checks whether an account may write the next anchor. |
+| `anchors(uint256 id)` | Reads a stored anchor by global anchor ID. |
+| `anchorCount()` | Returns `anchors.length`. |
+
+See [Threads](/onchain-anchoring/threads) for the thread lifecycle and access
+model.
+
+## Gas-sponsored calls
+
+There are no separate per-function relayed variants. Gas-sponsored actions use
+`TrustedForwarder.execute` with a deadline-bound EIP-712 `ForwardRequest`.
+
+The signed primary type is:
 
 ```text
-StoreSupplyAnchor(address account,uint8 dataType,bytes data,bytes32 tagHash,uint256 nonce)
+ForwardRequest(address from,address to,uint256 value,uint256 gas,uint256 nonce,uint48 deadline,bytes data)
 ```
 
-The domain uses:
+The `data` field is the ABI-encoded calldata for the canonical contract function,
+such as `createThread`, `addThreadParticipant`, or `storeThreadAnchor`.
 
-| Field | Value |
+| EIP-712 field | Value |
 | --- | --- |
-| `name` | `CanonicalSupplyChain` |
-| `version` | `1` |
-| `chainId` | `16001` on `devnet-1` |
-| `verifyingContract` | `0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B` on `devnet-1` |
+| `domain.name` | `TrustedForwarder` |
+| `domain.version` | `1` |
+| `domain.chainId` | `16001` on `devnet-1` |
+| `domain.verifyingContract` | Trusted forwarder address |
+| `message.to` | `CanonicalSupplyChain` proxy address |
+| `message.nonce` | `TrustedForwarder.nonces(from)` |
+| `message.deadline` | Unix timestamp after which the signature is invalid |
+| `message.data` | Encoded inner contract call |
 
-The contract checks that the recovered signer matches the credited `account` and
-that the supplied `nonce` matches `nonces(account)`. The nonce is consumed only
-after the signature is valid.
+The forwarder verifies the signer, nonce, and deadline, then calls the contract
+with the signer appended to calldata. Inside `CanonicalSupplyChain`, `_msgSender()`
+resolves to the original signer.
+
+## Decryption cohort registry
+
+Threshold-encrypted anchors use an owner-managed local proof-of-concept registry:
+
+| Function | Purpose |
+| --- | --- |
+| `registerDecryptionCohort(...)` | Registers a threshold keyset, suite ID, threshold, node count, activation, expiry, and active flag. |
+| `setActiveDecryptionCohort(uint32 cohortId)` | Selects the active cohort for new threshold-encrypted anchors. |
+| `setDecryptionNode(...)` | Records a node index, active flag, public share, signing address, and endpoint. |
+| `getDecryptionCohort(uint32 cohortId)` | Reads public cohort metadata. |
+| `getDecryptionNode(uint32 cohortId, uint16 nodeIndex)` | Reads public node metadata. |
+
+Publishers use the active cohort to encrypt new `thresholdEncrypted` anchors.
+Requesters and decryption nodes use the cohort and node metadata to authenticate
+decrypt-share responses.
 
 ## Validation
 
-The contract rejects invalid data types, hash payloads with the wrong byte length,
-oversized plaintext payloads, signatures from the wrong account, and stale or
-incorrect nonces.
+The contract rejects invalid anchor types, hash payloads with the wrong byte
+length, oversized plaintext payloads, threshold envelopes with invalid context,
+unauthorized thread writes, expired or invalid forwarder requests, and stale
+forwarder nonces.

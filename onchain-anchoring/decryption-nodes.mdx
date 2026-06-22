@@ -1,0 +1,135 @@
+---
+title: 'Decryption nodes'
+description: 'Run the node service that serves threshold decrypt shares'
+icon: 'server-cog'
+---
+
+Decryption nodes serve threshold-encrypted anchors. A node holds one threshold
+key share for a cohort and returns encrypted partial decrypt shares to
+authorized requesters.
+
+Nodes are separate from the DALE API, worker, indexer, and chain validators.
+They need chain RPC access and their own key material, but they do not need
+database access.
+
+<Warning>
+  Decryption nodes currently support the local proof-of-concept threshold suite.
+  Do not use this setup to protect real data until the cryptography is replaced
+  and reviewed.
+</Warning>
+
+## HTTP API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness plus the node's `cohortId` and `nodeIndex`. |
+| `POST` | `/v1/decrypt-share` | Verify a signed decrypt request and return an encrypted partial share. |
+
+For each `/v1/decrypt-share` request, the node:
+
+1. Validates request shape, version, chain, contract, cohort, and expiry.
+2. Verifies the requester's EIP-712 signature.
+3. Reads the active cohort, this node's membership, the anchor, and the envelope.
+4. Checks the envelope authenticated-data hash against chain context.
+5. Calls `canRead(threadId, anchorId, requester)`.
+6. Produces a partial decrypt share and proof.
+7. Signs the response and encrypts it to the requester's session public key.
+
+Errors are structured as:
+
+```json
+{
+  "error": {
+    "code": "requester_not_authorized",
+    "message": "Requester cannot read this anchor"
+  }
+}
+```
+
+## Request shape
+
+```json
+{
+  "request": {
+    "version": "threshold-anchor-decrypt-request-v1",
+    "chainId": "16001",
+    "contractAddress": "0x...",
+    "anchorId": "42",
+    "threadId": "0x...",
+    "cohortId": 1,
+    "suiteId": 1,
+    "requester": "0x...",
+    "recipientSessionPublicKey": "0x...",
+    "nonce": "0x...",
+    "expiry": "1782130000"
+  },
+  "signature": "0x..."
+}
+```
+
+The requester signs this payload as `ThresholdAnchorDecryptRequest`.
+
+## Response shape
+
+```json
+{
+  "nodeIndex": 2,
+  "cohortId": 1,
+  "anchorId": "42",
+  "encryptedShareResponse": "0x..."
+}
+```
+
+The encrypted share response contains the node index, partial decrypt share,
+suite-specific proof, request hash, response binding, and node signature. The
+requester decrypts and verifies the response locally.
+
+## Configuration
+
+Node-specific environment variables:
+
+| Variable | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `DECRYPTION_NODE_HOST` | No | `127.0.0.1` | Bind address. |
+| `DECRYPTION_NODE_PORT` | No | `3901` | Bind port. |
+| `DECRYPTION_COHORT_ID` | No | `1` | Cohort this node serves. |
+| `DECRYPTION_NODE_INDEX` | Yes | None | This node's index within the cohort. |
+| `DECRYPTION_PRIVATE_SHARE` | Yes | None | `0x` 32-byte threshold private share. |
+| `DECRYPTION_NODE_SIGNING_PRIVATE_KEY` | Yes | None | `0x` 32-byte key used to sign share responses. |
+
+Shared DALE runtime variables are also required:
+
+| Variable | Purpose |
+| --- | --- |
+| `CHAIN_RPC_URL` | RPC endpoint used to read contract state. |
+| `CHAIN_ID` | Chain ID checked against decrypt requests. |
+| `CONTRACT_ADDRESS` | `CanonicalSupplyChain` proxy address. |
+
+## Local workflow
+
+The easiest local path is the repository helper that registers a reusable
+three-of-five cohort and starts local node processes:
+
+```sh
+pnpm demo:threshold:nodes
+```
+
+For one-shot verification, run:
+
+```sh
+pnpm e2e:local
+```
+
+That harness deploys a local contract, registers a local cohort, starts the API,
+worker, indexer, and decryption nodes, submits threshold-encrypted anchors, and
+verifies authorized and unauthorized decrypt attempts.
+
+## Operational notes
+
+- Nodes keep an in-memory replay cache keyed by `requester:nonce` until request
+  expiry.
+- Nodes log approved and denied decisions with timestamp, requester, anchor ID,
+  cohort ID, request hash, decision, and reason.
+- Nodes should be operated independently in a production network.
+- Production deployment still needs reviewed threshold cryptography, key
+  generation, membership governance, cohort rotation, and share backup policy.

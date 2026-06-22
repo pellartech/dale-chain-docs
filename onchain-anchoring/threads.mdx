@@ -1,0 +1,132 @@
+---
+title: 'Threads'
+description: 'How DALE groups anchors and controls supply-chain access'
+icon: 'git-branch'
+---
+
+Threads are the access-control container for DALE anchors. A thread groups the
+chain records for one supply-chain context, such as a shipment, and decides who
+can write anchors or read protected anchor data.
+
+Each thread is created from an owner and seed:
+
+```solidity
+bytes32 threadId = keccak256(abi.encode(owner, seed));
+```
+
+The seed is application-defined. A demo might use a shipment ID; a production
+system might use a shipment reference, order ID, or another stable identifier
+that both the application and signer understand.
+
+## Thread state
+
+```solidity
+struct Thread {
+    bytes32 id;
+    address owner;
+    address pendingOwner;
+    address handler;
+    mapping(address account => bool allowed) participants;
+}
+```
+
+The thread exists once `owner` is nonzero. The contract returns thread metadata
+with `getThread(threadId)` rather than returning the mapping-bearing struct
+directly.
+
+## Built-in roles
+
+| Role | Access |
+| --- | --- |
+| Owner | Can read, write, add/remove participants, set a handler, and transfer ownership. |
+| Participant | Can read and write anchors in the thread. |
+| Pending owner | Can accept a pending ownership transfer. |
+| Handler-granted account | Can receive additional read/write access according to the handler. |
+
+Participants are simple per-thread grants. Removing a participant stops future
+read/write authorization, but it cannot erase data the participant already saw.
+
+## Contract functions
+
+| Function | Purpose |
+| --- | --- |
+| `createThread(bytes32 seed)` | Creates a deterministic thread owned by the caller. |
+| `addThreadParticipant(bytes32 threadId, address participant)` | Grants participant read/write access. |
+| `removeThreadParticipant(bytes32 threadId, address participant)` | Removes a participant grant. |
+| `setThreadHandler(bytes32 threadId, address handler)` | Sets an optional additive access handler. |
+| `transferThreadOwnership(bytes32 threadId, address newOwner)` | Starts a two-step ownership transfer. |
+| `acceptThreadOwnership(bytes32 threadId)` | Completes a pending ownership transfer. |
+| `storeThreadAnchor(bytes32 threadId, uint8 anchorType, bytes data, bytes32 tagHash)` | Stores a validated anchor if the effective sender can write. |
+| `canReadAll(bytes32 threadId, address account)` | Checks thread-wide read access. |
+| `canRead(bytes32 threadId, uint256 anchorId, address account)` | Checks thread-wide and per-anchor read access. |
+| `canWrite(bytes32 threadId, uint8 anchorType, bytes data, bytes32 tagHash, address account)` | Checks whether an account can write the next anchor. |
+
+Only the owner can change participants, handler, and ownership state. The pending
+owner must accept ownership before the transfer takes effect.
+
+## Handler access
+
+Handlers are optional contracts that add application-specific policy. A handler
+can grant:
+
+- thread-wide reads with `canReadAll(threadId, account)`
+- per-anchor reads with `canRead(anchorId, anchor, account)`
+- per-anchor writes with `canWrite(anchorId, anchor, account)`
+- post-write hooks with `didWrite(anchorId, anchor, account)`
+
+Handlers are additive. They cannot revoke built-in owner or participant access.
+If a handler reverts, the thread access check fails closed for that handler path.
+
+This keeps domain policy outside the core proof contract while preserving a
+single on-chain answer for readers, writers, and decryption nodes.
+
+## API flow
+
+Thread creation and admin operations use the API's gas-sponsored flow:
+
+1. Call `POST /threads/prepare`.
+2. Sign the returned `TrustedForwarder` EIP-712 payload.
+3. Call `POST /threads/submit` with the signature.
+4. Poll `GET /jobs/:id`.
+
+Thread anchors use:
+
+1. Call `POST /threads/:threadId/anchors/prepare`.
+2. Sign the returned payload.
+3. Call `POST /threads/:threadId/anchors/submit`.
+4. Poll `GET /jobs/:id`.
+5. Query indexed events with `GET /threads/:threadId/anchors`.
+
+The worker relays signed jobs through `TrustedForwarder.execute`, so the backend
+pays gas while the user's wallet remains the effective on-chain actor.
+
+## SDK flow
+
+Use the SDK helpers for the same operations:
+
+```ts
+const thread = await dale.submitThreadViaApi({
+  owner,
+  threadSeed: "shipment-123",
+});
+
+await dale.submitThreadAnchorViaApi({
+  account: owner,
+  threadId: thread.prepared.threadId,
+  anchor: {
+    json: { status: "packed" },
+    tag: "shipment-123",
+    visibility: "opaque",
+  },
+});
+```
+
+Use `submitThreadAdminViaApi` to add participants, remove participants, set
+handlers, transfer ownership, or accept ownership.
+
+## Thread access and encrypted anchors
+
+Threshold-encrypted anchors reuse the same thread policy. Decryption nodes call
+`canRead(threadId, anchorId, requester)` before serving a decrypt share. That
+means thread membership and handler grants are the source of truth for both
+ordinary contract reads and protocol-mediated decryption.

@@ -1,12 +1,12 @@
 ---
 title: 'Anchoring SDK'
-description: 'Use @dale/sdk to create, sign, submit, and watch DALE anchors'
+description: 'Use @dale/sdk to create threads, submit anchors, and decrypt protected data'
 icon: 'code'
 ---
 
 `@dale/sdk` is the TypeScript client for DALE anchoring. It wraps API calls, viem
-contract reads and writes, anchor normalization, signed relay preparation, event
-parsing, and polling.
+contract reads and writes, anchor normalization, signed `TrustedForwarder`
+payloads, event parsing, polling, and threshold-encrypted anchor helpers.
 
 The SDK expects callers to provide viem clients. Use a `publicClient` for reads,
 watches, and transaction waits. Use a `walletClient` for signing and writes.
@@ -19,7 +19,7 @@ import { createDaleClient } from "@dale/sdk";
 const dale = createDaleClient({
   apiBaseUrl: "http://dale-devnet-alb-305857230.ap-southeast-1.elb.amazonaws.com",
   apiKey: "<DALE_API_KEY>",
-  contractAddress: "0xB0BFC3a97d9FddB5f55f6839CAb51bDcb609632B",
+  contractAddress: "0xBCb9211802e530Fd6BE7Cd9157715249a15cAD9c",
   defaultAccount,
   publicClient,
   walletClient,
@@ -32,7 +32,7 @@ const dale = createDaleClient({
 | `apiKey` | Value sent as `x-api-key`. |
 | `contractAddress` | `CanonicalSupplyChain` proxy address. |
 | `defaultAccount` | Optional default viem `Account` or address. |
-| `publicClient` | Required for reads, watches, and transaction waits. |
+| `publicClient` | Required for reads, watches, threshold metadata, and transaction waits. |
 | `walletClient` | Required for signing and writes. |
 | `fetch` | Optional custom fetch implementation. |
 | `pollIntervalMs` | Optional default polling delay. |
@@ -41,15 +41,32 @@ const dale = createDaleClient({
 When a browser creates a local private key, pass a viem `Account` object rather
 than only an address. That lets viem sign locally.
 
-Build the viem `publicClient` and `walletClient` for the DALE network you are
-targeting before passing them into the SDK.
+## Create a thread
+
+Anchors live inside deterministic supply-chain threads. Create a thread before
+submitting shipment or status anchors:
+
+```ts
+const result = await dale.submitThreadViaApi({
+  owner: defaultAccount,
+  threadSeed: "shipment-123",
+});
+
+console.log(result.jobId, result.prepared.threadId);
+```
+
+`submitThreadViaApi` prepares a `TrustedForwarder` payload, signs it locally, and
+queues a chain job through the API. Use `createThreadDirect` when the connected
+wallet should submit the contract transaction itself.
 
 ## Anchor inputs
 
 You can submit an explicit anchor:
 
 ```ts
-await dale.submitSignedViaApi({
+await dale.submitThreadAnchorViaApi({
+  account: defaultAccount,
+  threadId,
   anchor: {
     type: "hashSha256",
     data: "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -61,7 +78,9 @@ await dale.submitSignedViaApi({
 You can also submit JSON:
 
 ```ts
-await dale.submitSignedViaApi({
+await dale.submitThreadAnchorViaApi({
+  account: defaultAccount,
+  threadId,
   anchor: {
     json: {
       shipmentId: "shipment-123",
@@ -78,6 +97,10 @@ await dale.submitSignedViaApi({
 | `opaque` or omitted | `hashSha256` | Canonical JSON is SHA-256 hashed and only the digest is anchored. |
 | `transparent` | `plaintext` | Canonical JSON is stored on-chain as plaintext. |
 
+SDK JSON `visibility: "opaque"` produces a hash commitment. It does not produce
+a threshold envelope. Use the dedicated threshold helpers for threshold
+encryption.
+
 The SDK canonicalizes JSON by sorting object keys. It rejects non-finite numbers
 and a bare top-level `undefined`.
 
@@ -85,20 +108,22 @@ and a bare top-level `undefined`.
 
 | Method | Path | Who pays gas | On-chain credited account |
 | --- | --- | --- | --- |
-| `submitDirect` | Direct contract call to `storeSupplyAnchor` | Connected wallet | Transaction signer |
-| `submitSignedViaApi` | API prepare, EIP-712 sign, API submit, worker relay | Worker relayer | Signed account |
+| `submitThreadAnchorDirect` | Direct contract call to `storeThreadAnchor` | Connected wallet | Transaction signer |
+| `submitThreadAnchorViaApi` | API prepare, EIP-712 sign, API submit, worker relay | Worker relayer | Signed account |
 
-Use `submitDirect` when the connected wallet should submit the transaction itself:
+Use `submitThreadAnchorDirect` when the connected wallet should submit the
+transaction itself:
 
 ```ts
-const result = await dale.submitDirect({
+const result = await dale.submitThreadAnchorDirect({
   account: defaultAccount,
+  threadId,
   anchor: {
     json: {
       shipmentId: "shipment-123",
       status: "packed",
     },
-    visibility: "opaque",
+    visibility: "transparent",
   },
   wait: true,
 });
@@ -106,11 +131,13 @@ const result = await dale.submitDirect({
 console.log(result.transactionHash, result.event);
 ```
 
-Use `submitSignedViaApi` when the user signs locally and the backend relays:
+Use `submitThreadAnchorViaApi` when the user signs locally and the backend
+relays:
 
 ```ts
-const result = await dale.submitSignedViaApi({
+const result = await dale.submitThreadAnchorViaApi({
   account: defaultAccount,
+  threadId,
   anchor: {
     type: "plaintext",
     data: "shipment 123 packed at dock 4",
@@ -123,30 +150,93 @@ console.log(result.jobId, result.prepared.dataHash);
 
 Track the returned `jobId` with `getJobStatus`.
 
+## Thread admin
+
+Use `submitThreadAdminViaApi` for participant and handler changes:
+
+```ts
+await dale.submitThreadAdminViaApi({
+  kind: "addParticipant",
+  account: threadOwner,
+  threadId,
+  participant: portOperator,
+});
+```
+
+Thread admin calls use the same gas-sponsored `TrustedForwarder` flow as anchor
+submissions.
+
+## Threshold-encrypted anchors
+
+Threshold-encrypted anchors are a local proof of concept. They encrypt payloads
+before publication, store an envelope on-chain, and allow authorized requesters
+to recover plaintext by collecting enough decryption-node shares. Do not use
+this mode for real protected data until the mock threshold suite is replaced
+with reviewed cryptography.
+
+Submit an encrypted anchor through the API:
+
+```ts
+const result = await dale.submitThresholdEncryptedAnchorViaApi({
+  account: defaultAccount,
+  threadId,
+  json: {
+    shipmentId: "shipment-123",
+    temperature: "2C",
+  },
+  tag: "shipment-123-private",
+});
+
+console.log(result.jobId, result.encrypted.expectedAnchorId);
+```
+
+Decrypt an indexed threshold-encrypted anchor:
+
+```ts
+const decrypted = await dale.decryptThresholdAnchor({
+  anchorId: 42n,
+  requester: defaultAccount,
+});
+
+console.log(decrypted.text);
+```
+
+The SDK fetches the stored envelope, verifies authenticated data, builds a
+short-lived EIP-712 decrypt request, contacts active cohort nodes at
+`/v1/decrypt-share`, verifies share responses, combines enough valid shares, and
+decrypts locally.
+
 ## API helpers
 
 | Method | Purpose |
 | --- | --- |
-| `prepareAnchor` | Calls `/anchor/prepare` and returns the typed-data payload. |
-| `getJobStatus(jobId)` | Calls `/anchor/status/:id`. |
-| `listEvents(options)` | Calls `/anchor/:account` or `/anchor/account`. |
+| `prepareThread` | Calls `/threads/prepare` for thread creation. |
+| `prepareThreadAdmin` | Calls `/threads/prepare` for thread admin jobs. |
+| `prepareThreadAnchor` | Calls `/threads/:threadId/anchors/prepare`. |
+| `getJobStatus(jobId)` | Calls `/jobs/:id`. |
+| `listThreadEvents(options)` | Calls `/threads/:threadId/anchors`. |
 | `hashPayload(data)` | Calls `/utils/hash` for SHA-256 hashing. |
 
-`listEvents` accepts `account`, `limit`, `offset`, `tag`, and
-`useAuthenticatedAccount`.
+`listThreadEvents` accepts `threadId`, `limit`, `offset`, and `tag`.
 
 ## Reads and watchers
 
 | Method | Purpose |
 | --- | --- |
-| `getSupplyAnchor(id)` | Reads `getSupplyAnchor` from the contract. |
-| `getAnchorCount()` | Reads `getAnchorCount` from the contract. |
+| `getSupplyAnchor(id)` | Reads `anchors(id)` from the contract. |
+| `getAnchorCount()` | Reads `anchorCount()`. |
+| `getThread(threadId)` | Reads thread metadata. |
+| `canReadAll(threadId, account)` | Checks thread-wide read access. |
+| `canRead(threadId, anchorId, account)` | Checks anchor-specific read access. |
+| `getActiveDecryptionCohortId()` | Reads the active threshold cohort ID. |
+| `getDecryptionCohort(cohortId)` | Reads public cohort metadata. |
+| `getDecryptionNode(cohortId, nodeIndex)` | Reads public node metadata. |
 | `watchContractEvents(options)` | Uses viem to watch live `SupplyAnchorCreated` logs. |
 | `watchIndexedEvents(options)` | Polls the API event list and calls `onEvent` for unseen indexed events. |
 
 `watchContractEvents` can filter by `account`, `dataHash`, and `tagHash`.
-`watchIndexedEvents` can use the same API list filters and accepts `onError`,
-`pollIntervalMs`, and `signal`.
+`watchIndexedEvents` accepts `threadId`, `tag`, `onError`, `pollIntervalMs`, and
+`signal`.
 
 ## Errors
 

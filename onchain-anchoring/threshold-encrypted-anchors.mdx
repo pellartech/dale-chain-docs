@@ -1,0 +1,194 @@
+---
+title: 'Threshold-encrypted anchors'
+description: 'Protocol-mediated disclosure for encrypted supply-chain data'
+icon: 'shield-lock'
+---
+
+Threshold-encrypted anchors add a third disclosure model to DALE. The publisher
+encrypts supply-chain data before publication, stores the ciphertext envelope
+on-chain, and authorized requesters decrypt locally after collecting enough
+partial shares from decryption nodes.
+
+<Warning>
+  This is currently a local proof of concept. It uses a mock threshold suite and
+  must not protect real data until the suite is replaced with reviewed threshold
+  cryptography.
+</Warning>
+
+## Disclosure modes
+
+| Mode | API and SDK type | On-chain data | Disclosure model |
+| --- | --- | --- | --- |
+| Transparent | `plaintext` | Plain UTF-8 payload bytes plus contract-computed hash | Everyone can read it. |
+| Opaque | `hashSha256` or `hashPoseidon` | Empty payload plus caller-supplied commitment | The data creator or application shares plaintext off-chain. |
+| Threshold-encrypted | `thresholdEncrypted` | Encrypted payload plus envelope metadata | DALE thread policy plus the decryption-node network. |
+
+Opaque anchors prove that later-revealed data matches an earlier on-chain
+commitment. Threshold-encrypted anchors go further: the encrypted data is
+available from the chain, and disclosure is mediated by on-chain authorization.
+
+## Actors
+
+| Actor | Role |
+| --- | --- |
+| Publisher | Creates and encrypts a supply-chain event. |
+| Requester | Signs a short-lived request to decrypt an encrypted anchor. |
+| DALE contract | Stores the anchor, thread policy, cohort metadata, and node metadata. |
+| Decryption nodes | Hold threshold key shares and serve partial decrypt shares only after checking contract access. |
+| SDK or application | Encrypts before publication, gathers shares, verifies responses, and decrypts locally. |
+
+Decryption nodes are not blockchain validators. They are separate services
+operated by the DALE network or independent operators.
+
+## Publish flow
+
+1. Canonicalize the payload.
+2. Generate a fresh data encryption key.
+3. Encrypt the payload with that key.
+4. Wrap the data encryption key to the active threshold cohort public key.
+5. Build a `ThresholdEnvelopeV1`.
+6. Submit a thread anchor with `type: "thresholdEncrypted"`.
+7. Store the ABI-encoded envelope in the anchor's `data` field.
+
+The contract validates the envelope on store. The envelope is bound to chain,
+contract, thread, expected anchor ID, tag, publisher, cohort, suite, and payload
+commitment through authenticated data.
+
+## Envelope shape
+
+```ts
+type ThresholdEnvelopeV1 = {
+  version: number;
+  expectedAnchorId: string;
+  cohortId: number;
+  suiteId: number;
+  kemPublicKey: Hex;
+  keyNonce: Hex;
+  encryptedKey: Hex;
+  payloadNonce: Hex;
+  encryptedPayload: Hex;
+  aadHash: Hex;
+  payloadCommitment: Hex;
+};
+```
+
+The envelope is ABI-encoded into `SupplyAnchor.data`. The anchor's `dataHash`
+stores `payloadCommitment`, not a hash of the ciphertext envelope.
+
+## Decrypt flow
+
+1. Fetch the encrypted anchor and cohort metadata.
+2. Generate a one-time session keypair for node responses.
+3. Build a short-lived decrypt request with anchor, thread, cohort, requester,
+   nonce, and expiry.
+4. Sign the request with EIP-712.
+5. Send the signed request to active cohort nodes.
+6. Each node verifies the signature, envelope context, node membership, and
+   requester access with `canRead(threadId, anchorId, requester)`.
+7. Authorized nodes return encrypted partial decrypt shares.
+8. The requester verifies node signatures, share proofs, duplicate node indexes,
+   and response binding.
+9. The requester combines enough valid shares and decrypts locally.
+
+Nodes do not receive plaintext supply-chain data. In the intended design, nodes
+also do not receive the data encryption key.
+
+## SDK helpers
+
+Use SDK helpers rather than hand-building envelopes:
+
+```ts
+const result = await dale.submitThresholdEncryptedAnchorViaApi({
+  account,
+  threadId,
+  json: {
+    shipmentId: "shipment-123",
+    temperature: "2C",
+  },
+  tag: "shipment-123-private",
+});
+```
+
+To decrypt:
+
+```ts
+const decrypted = await dale.decryptThresholdAnchor({
+  anchorId: 42n,
+  requester: account,
+});
+
+console.log(decrypted.text);
+```
+
+`decryptThresholdAnchor` discovers active cohort nodes, signs the decrypt
+request, calls `/v1/decrypt-share`, verifies share responses, combines enough
+valid shares, and returns local plaintext.
+
+## Access control
+
+Threshold-encrypted anchors reuse DALE's thread access model. A requester can
+receive decrypt shares only if the contract returns `true` for:
+
+```solidity
+canRead(threadId, anchorId, requester)
+```
+
+Owners and participants have built-in access. Optional handlers can grant
+thread-wide or per-anchor access. Decryption nodes do not decide who should be
+added to a shipment or thread; they enforce the authorization state already
+stored on-chain.
+
+Revocation is prospective. Removing a participant or changing a handler should
+stop honest nodes from serving future shares, but it cannot erase plaintext that
+an authorized user already decrypted and copied.
+
+## Cohorts and node discovery
+
+A decryption cohort is a threshold keyset and node membership group. The current
+proof of concept stores public cohort and node metadata on-chain:
+
+| Metadata | Purpose |
+| --- | --- |
+| `cohortId` | Identifies the keyset used by an anchor. |
+| `suiteId` | Identifies the crypto suite used for the envelope. |
+| `thresholdPublicKey` | Public key used to wrap data encryption keys. |
+| `threshold` | Number of valid shares required to decrypt. |
+| `nodeCount` | Number of registered nodes in the cohort. |
+| Node endpoint | HTTP base URL for `/v1/decrypt-share`. |
+| Node signing address | Verifies share responses. |
+| Node public share | Verifies suite-specific partial share proofs. |
+
+The local proof of concept uses a fixed local three-of-five cohort. Production
+membership, key generation, rotation, slashing, and re-encryption are separate
+design topics.
+
+## Trust model
+
+Threshold-encrypted anchors improve disclosure control, but they do not remove
+all trust assumptions.
+
+The intended guarantees are:
+
+- Public observers can see that an encrypted anchor exists.
+- Public observers cannot read plaintext from chain data alone.
+- No single decryption node can decrypt the payload.
+- Honest nodes only serve shares after checking on-chain access.
+- Authorized users decrypt locally after collecting enough valid shares.
+
+The main assumptions are:
+
+- Fewer than the threshold number of nodes collude.
+- Cohort key generation is correct.
+- Node private shares and signing keys are protected.
+- Publishers use strong randomness.
+- Requesters verify node signatures, share proofs, and response binding.
+- Contract thread policy is the intended authorization source.
+
+Known limitations:
+
+- A threshold collusion can decrypt protected anchors.
+- Users who already decrypted plaintext can copy or share it.
+- Decryption nodes can see request metadata.
+- On-chain encrypted payloads can be expensive for large records.
+- Production use requires audited threshold cryptography and cryptographic
+  review.

@@ -1,17 +1,17 @@
 ---
 title: 'Anchoring API'
-description: 'Prepare, submit, and track on-chain anchors through the DALE API'
+description: 'Prepare, submit, and track threaded on-chain anchors through the DALE API'
 icon: 'server'
 ---
 
 `@dale/api` is the Fastify service that connects applications to DALE anchoring.
-It prepares EIP-712 signing payloads, queues anchor jobs, exposes job status, lists
-indexed contract events, and serves generated OpenAPI.
+It prepares EIP-712 `TrustedForwarder` payloads, queues chain jobs, exposes job
+status, lists indexed thread anchors, and serves generated OpenAPI.
 
 <Card title="Recommended: use the SDK" icon="code" href="/onchain-anchoring/sdk">
   For most applications, use `@dale/sdk` instead of calling the anchoring API
-  directly. The SDK handles payload normalization, EIP-712 signing, submission,
-  status polling, and event helpers.
+  directly. The SDK handles payload normalization, thread helpers, EIP-712
+  signing, submission, job polling, and event listing.
 </Card>
 
 ## Devnet endpoint
@@ -30,9 +30,9 @@ Most routes require an API key:
 x-api-key: <DALE_API_KEY>
 ```
 
-On devnet, any EVM account can prepare and submit anchors with a valid API key.
-If another environment returns `account_not_allowed`, ask for that address to be
-enabled before preparing or submitting anchors.
+On devnet, any EVM account can prepare and submit thread jobs with a valid API
+key. If another environment returns `account_not_allowed`, ask for that address
+to be enabled before preparing or submitting.
 
 Public routes are `GET /health`, `GET /openapi.json`, `GET /docs`, and
 `POST /utils/hash`.
@@ -42,13 +42,53 @@ Public routes are `GET /health`, `GET /openapi.json`, `GET /docs`, and
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/utils/hash` | Hash strings or canonicalized JSON with SHA-256. |
-| `POST` | `/anchor/prepare` | Validate an anchor and return an EIP-712 payload to sign. |
-| `POST` | `/anchor/submit` | Queue an unsigned or signed anchor job. |
-| `GET` | `/anchor/status/:id` | Read the current state of a queued anchor job. |
-| `GET` | `/anchor/account` | List indexed events for the authenticated or selected account. |
-| `GET` | `/anchor/:account` | List indexed events for a specific allowed account. |
+| `POST` | `/threads/prepare` | Prepare a signed thread creation or thread-admin payload. |
+| `POST` | `/threads/submit` | Queue a signed thread creation or thread-admin chain job. |
+| `POST` | `/threads/:threadId/anchors/prepare` | Prepare a signed thread-anchor payload. |
+| `POST` | `/threads/:threadId/anchors/submit` | Queue a signed thread-anchor chain job. |
+| `GET` | `/jobs/:id` | Read the current state of a queued chain job. |
+| `GET` | `/threads/:threadId/anchors` | List indexed anchors for one thread. |
 
-## Anchor request
+## Thread jobs
+
+Thread creation and admin operations share `/threads/prepare` and
+`/threads/submit`. The request body determines the operation.
+
+Create a thread:
+
+```json
+{
+  "owner": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "threadSeed": "shipment-123"
+}
+```
+
+The API normalizes the seed, computes the deterministic thread ID, reads the
+owner's forwarder nonce, and returns an EIP-712 `ForwardRequest` payload to sign.
+
+After signing, submit the same request with the returned signature fields:
+
+```json
+{
+  "owner": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "threadSeed": "shipment-123",
+  "nonce": "7",
+  "deadline": "1782130000",
+  "signature": "0x..."
+}
+```
+
+Thread-admin jobs use the same prepare/submit pair. Supported admin kinds are
+participant grants, participant removals, handler updates, ownership transfer,
+and ownership acceptance. The returned job is executed by the worker through
+`TrustedForwarder.execute`, so the user remains the credited on-chain actor while
+the backend pays gas.
+
+See [Threads](/onchain-anchoring/threads) for the access model.
+
+## Thread anchor request
+
+Prepare an anchor for a thread:
 
 ```json
 {
@@ -59,54 +99,59 @@ Public routes are `GET /health`, `GET /openapi.json`, `GET /docs`, and
 }
 ```
 
-`type` can be `hashSha256`, `hashPoseidon`, or `plaintext`. Hash anchor data must
-be a `0x`-prefixed 32-byte hex string. Plaintext anchor data is a UTF-8 string up
-to 1024 bytes. `tag` is optional and is hashed before it reaches the contract.
+`type` can be `hashSha256`, `hashPoseidon`, `plaintext`, or
+`thresholdEncrypted`.
 
-Signed submissions to `/anchor/submit` must include both:
+| Type | `data` value |
+| --- | --- |
+| `hashSha256` | `0x`-prefixed 32-byte commitment. |
+| `hashPoseidon` | `0x`-prefixed 32-byte commitment. |
+| `plaintext` | UTF-8 string up to 1024 bytes. |
+| `thresholdEncrypted` | `0x` ABI-encoded `ThresholdEnvelopeV1`. |
+
+The API hashes optional `tag` values before they reach the contract. For
+threshold-encrypted anchors, the API and contract treat `data` as ciphertext
+envelope bytes; they do not decrypt it.
+
+Signed submissions to `/threads/:threadId/anchors/submit` must include:
 
 | Field | Description |
 | --- | --- |
-| `nonce` | Decimal uint256 string or safe integer returned by `/anchor/prepare`. |
-| `signature` | 65-byte EVM signature as `0x`-prefixed hex. |
+| `nonce` | Decimal uint256 string returned by prepare. |
+| `deadline` | Unix timestamp returned by prepare. |
+| `signature` | EVM signature for the returned `ForwardRequest`. |
 
-Supplying only one of `nonce` or `signature` is a validation error.
+Supplying only some signature fields is a validation error.
 
 ## Signed relay flow
 
-Call `POST /anchor/prepare` with the anchor request. The API validates the request,
-checks the account allowlist, reads `nonces(account)` from the contract, and
-returns the normalized EIP-712 domain, types, and message.
-
-After the account signs that payload, call `POST /anchor/submit` with the same
-anchor request plus the returned `nonce` and wallet `signature`. The API verifies
-the signature before queueing the job. The worker later relays it through
-`storeSupplyAnchorFrom`, so the worker pays gas and the signed account is credited
-on-chain.
-
-Unsigned submissions are also accepted by `/anchor/submit`. In that case, the
-worker calls `storeSupplyAnchor`, and the worker transaction signer is credited
-on-chain.
+1. Call `POST /threads/:threadId/anchors/prepare` with the anchor request.
+2. Sign the returned EIP-712 payload with the credited account.
+3. Call `POST /threads/:threadId/anchors/submit` with the same anchor request,
+   the returned `nonce` and `deadline`, and the wallet `signature`.
+4. The API verifies the signature before queueing the job.
+5. The worker submits `TrustedForwarder.execute(...)`.
+6. The contract resolves `_msgSender()` to the signer and stores the anchor only
+   if that signer can write to the thread.
 
 ## Job status
 
-`POST /anchor/submit` returns a `jobId`. Track it with `GET /anchor/status/:id`.
+Submit routes return a `jobId`. Track it with `GET /jobs/:id`.
 
 | Status | Meaning |
 | --- | --- |
 | `queued` | The job is ready for the worker. |
 | `processing` | The worker claimed the job and is submitting the transaction. |
 | `submitted` | The transaction hash is known and indexing may still be pending. |
-| `success` | The receipt emitted `SupplyAnchorCreated`; event and block details are available. |
+| `success` | The receipt emitted the expected event and indexed details are available. |
 | `failed` | The worker hit a permanent error or exhausted retries. |
 
-Successful status responses can include `transactionHash`, `eventId`, `anchorId`,
-and `blockNumber`.
+Successful status responses can include `transactionHash`, `eventId`,
+`anchorId`, and `blockNumber`.
 
-## Listing events
+## Listing thread anchors
 
-`GET /anchor/:account` and `GET /anchor/account` read indexed rows from
-`anchor_events`.
+`GET /threads/:threadId/anchors` reads indexed rows from `anchor_events`.
 
 Use these query parameters:
 
@@ -117,7 +162,8 @@ Use these query parameters:
 | `tag` | Optional exact tag filter. |
 
 Hash anchors return an empty `data` value. Plaintext anchors return the indexed
-UTF-8 payload.
+UTF-8 payload. Threshold-encrypted anchors return the indexed envelope hex; the
+API and indexer do not decrypt encrypted anchors.
 
 ## Error shape
 
@@ -139,4 +185,5 @@ Explicit API errors use this shape:
 ```
 
 Common codes include `unauthorized`, `account_not_allowed`, `validation_error`,
-`invalid_signature`, `contract_not_configured`, `not_found`, and `internal_error`.
+`invalid_signature`, `signature_expired`, `contract_not_configured`, `not_found`,
+and `internal_error`.
