@@ -29,10 +29,10 @@
           {
             "group": "Onchain anchoring",
             "pages": [
-              "onchain-anchoring/threads",
               "onchain-anchoring/contract",
               "onchain-anchoring/api",
               "onchain-anchoring/sdk",
+              "onchain-anchoring/threads",
               "onchain-anchoring/threshold-encrypted-anchors",
               "onchain-anchoring/decryption-nodes"
             ]
